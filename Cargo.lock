@@ -360,7 +360,7 @@ checksum = "edcd27d72f2f071c64249075f42e205ff93c9a4c5f6c6da53e79ed9f9832c285"
 
 [[package]]
 name = "imatree"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
