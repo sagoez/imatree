@@ -1,43 +1,45 @@
 use std::{
-    error::Error,
     fmt::{self, Display, Formatter},
     num::NonZeroU32,
 };
 
-use text_to_png::Color;
+use text_to_png::Color as RendererColor;
 
 /// A domain validation failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum DomainError {
+    /// The caption held no printable text.
+    #[error("caption must contain text")]
     EmptyCaption,
+
+    /// The requested canvas width was zero.
+    #[error("canvas width must be greater than zero")]
     ZeroWidth,
+
+    /// The requested canvas height was zero.
+    #[error("canvas height must be greater than zero")]
     ZeroHeight,
-    InvalidTextColor(String),
-}
 
-impl Display for DomainError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyCaption => formatter.write_str("caption must contain text"),
-            Self::ZeroWidth => formatter.write_str("canvas width must be greater than zero"),
-            Self::ZeroHeight => formatter.write_str("canvas height must be greater than zero"),
-            Self::InvalidTextColor(color) => {
-                write!(
-                    formatter,
-                    "'{color}' is not a valid color name or RGB hex value"
-                )
-            }
-        }
-    }
-}
+    /// An explicit font size of zero was requested.
+    #[error("font size must be greater than zero")]
+    ZeroFontSize,
 
-impl Error for DomainError {}
+    /// The colour was neither a known name nor an RGB hex value.
+    #[error("'{0}' is not a valid color name or RGB hex value")]
+    InvalidColor(String),
+}
 
 /// The text displayed in the generated image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caption(String);
 
 impl Caption {
+    /// Creates a caption, rejecting text that is empty or entirely whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::EmptyCaption`] if `value` has no printable text.
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
 
@@ -48,16 +50,27 @@ impl Caption {
         }
     }
 
+    /// The caption text as written.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// The caption split into words, with runs of whitespace collapsed.
+    pub(crate) fn words(&self) -> impl Iterator<Item = &str> {
+        self.0.split_whitespace()
+    }
+
+    /// A PNG file name derived deterministically from this caption.
+    #[must_use]
     pub fn output_file_name(&self) -> OutputFileName {
         OutputFileName::from_caption(self)
     }
+}
 
-    fn character_count(&self) -> usize {
-        self.0.chars().count()
+impl Display for Caption {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -95,6 +108,8 @@ impl OutputFileName {
         Self(stem)
     }
 
+    /// The file name, including the `.png` extension.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -114,6 +129,12 @@ pub struct CanvasSize {
 }
 
 impl CanvasSize {
+    /// Creates a canvas size from pixel dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::ZeroWidth`] or [`DomainError::ZeroHeight`] if
+    /// either dimension is zero.
     pub fn new(width: u32, height: u32) -> Result<Self, DomainError> {
         let width = NonZeroU32::new(width).ok_or(DomainError::ZeroWidth)?;
         let height = NonZeroU32::new(height).ok_or(DomainError::ZeroHeight)?;
@@ -121,10 +142,14 @@ impl CanvasSize {
         Ok(Self { width, height })
     }
 
+    /// Canvas width in pixels.
+    #[must_use]
     pub fn width(self) -> u32 {
         self.width.get()
     }
 
+    /// Canvas height in pixels.
+    #[must_use]
     pub fn height(self) -> u32 {
         self.height.get()
     }
@@ -133,65 +158,102 @@ impl CanvasSize {
 /// The requested font-sizing rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontSizing {
+    /// Grow the caption to the largest size that fits the canvas.
     Automatic,
+
+    /// Draw the caption at exactly this many pixels.
     Fixed(NonZeroU32),
 }
 
 impl FontSizing {
-    pub fn from_pixels(pixels: u32) -> Self {
-        NonZeroU32::new(pixels).map_or(Self::Automatic, Self::Fixed)
-    }
-
-    pub fn pixels_for(self, caption: &Caption) -> u32 {
-        match self {
-            Self::Fixed(pixels) => pixels.get(),
-            Self::Automatic => match caption.character_count() {
-                0..=10 => 100,
-                11..=20 => 75,
-                21..=30 => 50,
-                31..=40 => 25,
-                41..=50 => 17,
-                51..=60 => 10,
-                _ => 5,
-            },
-        }
+    /// Requests an exact font size in pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::ZeroFontSize`] if `pixels` is zero.
+    pub fn fixed(pixels: u32) -> Result<Self, DomainError> {
+        NonZeroU32::new(pixels)
+            .map(Self::Fixed)
+            .ok_or(DomainError::ZeroFontSize)
     }
 }
 
-/// A color accepted by the text renderer, parsed at the domain boundary.
+/// A colour accepted by the renderer, parsed at the domain boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextColor(Color);
+pub struct Color(RendererColor);
 
-impl TextColor {
+impl Color {
+    /// Parses a colour name (`"Black"`) or RGB hex value (`"#4a90e2"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidColor`] if `value` is neither.
     pub fn parse(value: &str) -> Result<Self, DomainError> {
-        Color::try_from(value)
+        RendererColor::try_from(value)
             .map(Self)
-            .map_err(|()| DomainError::InvalidTextColor(value.to_owned()))
+            .map_err(|()| DomainError::InvalidColor(value.to_owned()))
     }
 
-    pub(crate) fn value(self) -> Color {
+    /// The red, green and blue channels.
+    #[must_use]
+    pub fn rgb(self) -> (u8, u8, u8) {
+        (self.0.r, self.0.g, self.0.b)
+    }
+
+    pub(crate) fn value(self) -> RendererColor {
         self.0
+    }
+}
+
+/// What the caption is drawn onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    /// Leave the canvas fully transparent.
+    Transparent,
+
+    /// Fill the canvas with a single colour.
+    Solid(Color),
+}
+
+impl Background {
+    /// Parses `"transparent"` or any colour accepted by [`Color::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidColor`] if `value` is neither.
+    pub fn parse(value: &str) -> Result<Self, DomainError> {
+        if value.trim().eq_ignore_ascii_case("transparent") {
+            Ok(Self::Transparent)
+        } else {
+            Color::parse(value).map(Self::Solid)
+        }
     }
 }
 
 /// The visual rules for rendering a caption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextStyle {
-    color: TextColor,
+    color: Color,
     sizing: FontSizing,
 }
 
 impl TextStyle {
-    pub fn new(color: TextColor, sizing: FontSizing) -> Self {
+    /// Combines a text colour with a font-sizing rule.
+    #[must_use]
+    pub fn new(color: Color, sizing: FontSizing) -> Self {
         Self { color, sizing }
     }
 
-    pub(crate) fn color(self) -> Color {
-        self.color.value()
+    /// The text colour.
+    #[must_use]
+    pub fn color(self) -> Color {
+        self.color
     }
 
-    pub(crate) fn font_size_for(self, caption: &Caption) -> u32 {
-        self.sizing.pixels_for(caption)
+    /// The font-sizing rule.
+    #[must_use]
+    pub fn sizing(self) -> FontSizing {
+        self.sizing
     }
 }
 
@@ -201,54 +263,54 @@ pub struct ImageSpec {
     caption: Caption,
     canvas: CanvasSize,
     text_style: TextStyle,
+    background: Background,
 }
 
 impl ImageSpec {
-    pub fn new(caption: Caption, canvas: CanvasSize, text_style: TextStyle) -> Self {
+    /// Assembles a specification from already-validated parts.
+    #[must_use]
+    pub fn new(
+        caption: Caption,
+        canvas: CanvasSize,
+        text_style: TextStyle,
+        background: Background,
+    ) -> Self {
         Self {
             caption,
             canvas,
             text_style,
+            background,
         }
     }
 
+    /// The caption to draw.
+    #[must_use]
     pub fn caption(&self) -> &Caption {
         &self.caption
     }
 
+    /// The canvas dimensions.
+    #[must_use]
     pub fn canvas(&self) -> CanvasSize {
         self.canvas
     }
 
+    /// The text colour and sizing rule.
+    #[must_use]
     pub fn text_style(&self) -> TextStyle {
         self.text_style
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Position {
-    pub x: i64,
-    pub y: i64,
-}
-
-pub(crate) fn centered_position(
-    canvas: CanvasSize,
-    content_width: u32,
-    content_height: u32,
-) -> Position {
-    Position {
-        x: (i64::from(canvas.width()) - i64::from(content_width)).div_euclid(2),
-        y: (i64::from(canvas.height()) - i64::from(content_height)).div_euclid(2),
+    /// The canvas fill.
+    #[must_use]
+    pub fn background(&self) -> Background {
+        self.background
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn caption_with_length(length: usize) -> Caption {
-        Caption::new("x".repeat(length)).expect("test caption is non-empty")
-    }
 
     #[test]
     fn caption_rejects_blank_text() {
@@ -279,43 +341,50 @@ mod tests {
     }
 
     #[test]
-    fn automatic_font_size_uses_character_count() {
-        let sizing = FontSizing::Automatic;
-
-        assert_eq!(sizing.pixels_for(&caption_with_length(10)), 100);
-        assert_eq!(sizing.pixels_for(&caption_with_length(11)), 75);
-        assert_eq!(
-            sizing.pixels_for(&Caption::new("é".repeat(10)).unwrap()),
-            100
-        );
-    }
-
-    #[test]
-    fn zero_font_size_means_automatic() {
-        assert_eq!(FontSizing::from_pixels(0), FontSizing::Automatic);
-        assert_eq!(
-            FontSizing::from_pixels(42).pixels_for(&caption_with_length(1)),
-            42
-        );
+    fn an_explicit_font_size_must_be_non_zero() {
+        assert_eq!(FontSizing::fixed(0), Err(DomainError::ZeroFontSize));
+        assert!(matches!(FontSizing::fixed(42), Ok(FontSizing::Fixed(_))));
     }
 
     #[test]
     fn invalid_colors_are_rejected_at_the_boundary() {
         assert_eq!(
-            TextColor::parse("not a color"),
-            Err(DomainError::InvalidTextColor("not a color".to_owned()))
+            Color::parse("not a color"),
+            Err(DomainError::InvalidColor("not a color".to_owned()))
         );
-        assert!(TextColor::parse("#4a90e2").is_ok());
-        assert!(TextColor::parse("Black").is_ok());
+        assert!(Color::parse("#4a90e2").is_ok());
+        assert!(Color::parse("Black").is_ok());
     }
 
     #[test]
-    fn oversized_content_is_centered_without_unsigned_underflow() {
-        let canvas = CanvasSize::new(100, 80).unwrap();
+    fn colors_expose_their_channels() {
+        assert_eq!(Color::parse("#4a90e2").unwrap().rgb(), (0x4a, 0x90, 0xe2));
+    }
 
+    #[test]
+    fn backgrounds_accept_transparency_and_colors() {
         assert_eq!(
-            centered_position(canvas, 120, 100),
-            Position { x: -10, y: -10 }
+            Background::parse("transparent"),
+            Ok(Background::Transparent)
         );
+        assert_eq!(
+            Background::parse("TRANSPARENT"),
+            Ok(Background::Transparent)
+        );
+        assert_eq!(
+            Background::parse("White"),
+            Ok(Background::Solid(Color::parse("White").unwrap()))
+        );
+        assert_eq!(
+            Background::parse("nonsense"),
+            Err(DomainError::InvalidColor("nonsense".to_owned()))
+        );
+    }
+
+    #[test]
+    fn captions_are_split_into_words() {
+        let caption = Caption::new("  two \n\t words  ").unwrap();
+
+        assert_eq!(caption.words().collect::<Vec<_>>(), vec!["two", "words"]);
     }
 }
