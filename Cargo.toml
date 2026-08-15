@@ -2,7 +2,7 @@
 name = "imatree"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A simple command line tool to generate aesthetically pleasing (and sometimes not so pleasing) images of whatever string you want."
 license = "MIT"
 repository = "https://github.com/sagoez/imatree"
